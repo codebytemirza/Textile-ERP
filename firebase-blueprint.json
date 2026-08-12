@@ -1,0 +1,153 @@
+{
+  "projectInfo": {
+    "name": "Textile Trading ERP",
+    "description": "Textile Trading & Job-Work Management System"
+  },
+  "collections": [
+    {
+      "name": "users",
+      "description": "User accounts and roles",
+      "documentId": "User UID from Firebase Auth",
+      "fields": [
+        { "name": "email", "type": "string", "description": "User email address" },
+        { "name": "role", "type": "string", "description": "Admin, Manager, or ShopStaff" },
+        { "name": "name", "type": "string", "description": "User's full name" }
+      ],
+      "rules": {
+        "read": "request.auth != null",
+        "create": "false", 
+        "update": "request.auth != null && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'Admin'",
+        "delete": "request.auth != null && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'Admin'"
+      }
+    },
+    {
+      "name": "yarn_inventory",
+      "description": "Raw material yarn purchases and stock",
+      "fields": [
+        { "name": "supplierName", "type": "string" },
+        { "name": "yarnType", "type": "string" },
+        { "name": "quantityKg", "type": "number" },
+        { "name": "ratePerKg", "type": "number" },
+        { "name": "totalCost", "type": "number" },
+        { "name": "purchaseDate", "type": "timestamp" },
+        { "name": "paymentStatus", "type": "string" },
+        { "name": "balanceKg", "type": "number", "description": "Running balance of stock" }
+      ],
+      "rules": {
+        "read": "request.auth != null",
+        "write": "request.auth != null && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['Admin', 'Manager']"
+      }
+    },
+    {
+      "name": "factories",
+      "description": "Third-party factories for weaving and dyeing",
+      "fields": [
+        { "name": "name", "type": "string" },
+        { "name": "contact", "type": "string" },
+        { "name": "type", "type": "string", "description": "Weaving, Dyeing, Both" },
+        { "name": "balance", "type": "number", "description": "Amount owed to the factory" }
+      ],
+      "rules": {
+        "read": "request.auth != null",
+        "write": "request.auth != null && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['Admin', 'Manager']"
+      }
+    },
+    {
+      "name": "production_lots",
+      "description": "Production lots tracking yarn sent to factories",
+      "fields": [
+        { "name": "lotNumber", "type": "string" },
+        { "name": "yarnId", "type": "string" },
+        { "name": "quantityIssued", "type": "number" },
+        { "name": "factoryId", "type": "string" },
+        { "name": "dateSent", "type": "timestamp" },
+        { "name": "expectedFabricMeters", "type": "number" },
+        { "name": "status", "type": "string", "description": "Yarn Issued, At Weaving, Weaving Complete, Sent for Dyeing, Dyeing Complete, Received in Stock" },
+        { "name": "weavingCharges", "type": "number" },
+        { "name": "dyeingCharges", "type": "number" },
+        { "name": "actualFabricMeters", "type": "number" },
+        { "name": "totalCost", "type": "number" },
+        { "name": "costPerMeter", "type": "number" }
+      ],
+      "rules": {
+        "read": "request.auth != null",
+        "write": "request.auth != null && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['Admin', 'Manager']"
+      }
+    },
+    {
+      "name": "finished_fabrics",
+      "description": "Inventory of finished goods",
+      "fields": [
+        { "name": "lotId", "type": "string" },
+        { "name": "fabricType", "type": "string" },
+        { "name": "quantityMeters", "type": "number" },
+        { "name": "costPerMeter", "type": "number" }
+      ],
+      "rules": {
+        "read": "request.auth != null",
+        "write": "request.auth != null && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['Admin', 'Manager']"
+      }
+    },
+    {
+      "name": "customers",
+      "description": "Wholesale customers",
+      "fields": [
+        { "name": "name", "type": "string" },
+        { "name": "contact", "type": "string" },
+        { "name": "balance", "type": "number" }
+      ],
+      "rules": {
+        "read": "request.auth != null",
+        "write": "request.auth != null && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['Admin', 'Manager']"
+      }
+    },
+    {
+      "name": "retail_sales",
+      "description": "Point of sale retail transactions",
+      "fields": [
+        { "name": "date", "type": "timestamp" },
+        { "name": "totalAmount", "type": "number" },
+        { "name": "paymentMethod", "type": "string" },
+        { "name": "shopLocation", "type": "string" },
+        { "name": "items", "type": "array" }
+      ],
+      "rules": {
+        "read": "request.auth != null",
+        "write": "request.auth != null"
+      }
+    },
+    {
+      "name": "wholesale_invoices",
+      "description": "Wholesale transactions",
+      "fields": [
+        { "name": "customerId", "type": "string" },
+        { "name": "date", "type": "timestamp" },
+        { "name": "totalAmount", "type": "number" },
+        { "name": "paidAmount", "type": "number" },
+        { "name": "status", "type": "string" },
+        { "name": "dueDate", "type": "timestamp" },
+        { "name": "items", "type": "array" }
+      ],
+      "rules": {
+        "read": "request.auth != null",
+        "write": "request.auth != null && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['Admin', 'Manager']"
+      }
+    },
+    {
+      "name": "ledgers",
+      "description": "Ledger entries for accounts",
+      "fields": [
+        { "name": "type", "type": "string", "description": "Factory, Customer, Cash" },
+        { "name": "referenceId", "type": "string", "description": "ID of factory or customer" },
+        { "name": "transactionId", "type": "string", "description": "ID of related lot/invoice" },
+        { "name": "amount", "type": "number" },
+        { "name": "date", "type": "timestamp" },
+        { "name": "description", "type": "string" }
+      ],
+      "rules": {
+        "read": "request.auth != null",
+        "write": "request.auth != null && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['Admin', 'Manager']"
+      }
+    }
+  ]
+}
