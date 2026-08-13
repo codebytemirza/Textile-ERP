@@ -1,329 +1,293 @@
-import { formatCurrency } from "../lib/utils";
-import { useState, useEffect } from "react";
-import { collection, query, orderBy, onSnapshot, getDocs, doc, writeBatch, increment, where } from "firebase/firestore";
-import { db } from "../lib/firebase";
-import { LedgerEntry, Factory, Customer, Supplier, WholesaleInvoice } from "../types";
-import { Card, Input, Button } from "../components/ui";
-import { format } from "date-fns";
+import { useMemo, useState } from "react";
+import {
+  Box,
+  Button,
+  Chip,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  InputAdornment,
+  MenuItem,
+  Paper,
+  Stack,
+  Tab,
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TableRow,
+  Tabs,
+  TextField,
+  Typography,
+} from "@mui/material";
+import { Payments, Search } from "@mui/icons-material";
+import { collectionApi, businessApi } from "../api";
+import { useCollection } from "../lib/useCollection";
+import { useToast } from "../contexts/ToastContext";
+import { EmptyState, PageHeader, Loader } from "../components/PageHeader";
+import type { Customer, Factory, LedgerEntry, Supplier } from "../types";
+import { formatCurrency, formatDate } from "../lib/utils";
+
+type TabKey = "Cash" | "Factory" | "Customer" | "Supplier";
+
+interface PaymentForm {
+  type: "Factory" | "Supplier" | "Customer";
+  entityId: string;
+  amount: string;
+}
+
+const emptyPayment: PaymentForm = { type: "Factory", entityId: "", amount: "" };
 
 export function Ledgers() {
-  const [ledgers, setLedgers] = useState<LedgerEntry[]>([]);
-  const [factories, setFactories] = useState<Factory[]>([]);
-  const [customers, setCustomers] = useState<Customer[]>([]);
-  const [suppliers, setSuppliers] = useState<Supplier[]>([]);
-  
-  const [activeTab, setActiveTab] = useState<'Factory' | 'Customer' | 'Supplier' | 'Cash'>('Cash');
-  const [search, setSearch] = useState('');
+  const toast = useToast();
+  const { data: ledgers, loading, refresh } = useCollection<LedgerEntry>(
+    () => collectionApi<LedgerEntry>("ledgers").list(),
+    []
+  );
+  const { data: factories, refresh: refreshFactories } = useCollection<Factory>(
+    () => collectionApi<Factory>("factories").list(),
+    []
+  );
+  const { data: customers, refresh: refreshCustomers } = useCollection<Customer>(
+    () => collectionApi<Customer>("customers").list(),
+    []
+  );
+  const { data: suppliers, refresh: refreshSuppliers } = useCollection<Supplier>(
+    () => collectionApi<Supplier>("suppliers").list(),
+    []
+  );
 
-  // Payment Recording state
-  const [paymentType, setPaymentType] = useState<'Factory' | 'Customer' | 'Supplier' | null>(null);
-  const [paymentEntityId, setPaymentEntityId] = useState('');
-  const [paymentAmount, setPaymentAmount] = useState(0);
+  const [tab, setTab] = useState<TabKey>("Cash");
+  const [search, setSearch] = useState("");
+  const [payOpen, setPayOpen] = useState(false);
+  const [payment, setPayment] = useState<PaymentForm>(emptyPayment);
+  const [saving, setSaving] = useState(false);
 
-  useEffect(() => {
-    const unsubLedgers = onSnapshot(query(collection(db, "ledgers"), orderBy("date", "desc")), snap => {
-      setLedgers(snap.docs.map(d => ({ id: d.id, ...d.data() } as LedgerEntry)));
-    }, err => console.warn(err));
-    const unsubFact = onSnapshot(query(collection(db, "factories")), snap => {
-      setFactories(snap.docs.map(d => ({ id: d.id, ...d.data() } as Factory)));
-    }, err => console.warn(err));
-    const unsubCust = onSnapshot(query(collection(db, "customers")), snap => {
-      setCustomers(snap.docs.map(d => ({ id: d.id, ...d.data() } as Customer)));
-    }, err => console.warn(err));
-    const unsubSupp = onSnapshot(query(collection(db, "suppliers")), snap => {
-      setSuppliers(snap.docs.map(d => ({ id: d.id, ...d.data() } as Supplier)));
-    }, err => console.warn(err));
+  const entityName = (l: LedgerEntry): string => {
+    if (!l.referenceId) return "";
+    if (l.type === "Factory") return (factories ?? []).find((f) => f.id === l.referenceId)?.name ?? "";
+    if (l.type === "Customer") return (customers ?? []).find((c) => c.id === l.referenceId)?.name ?? "";
+    if (l.type === "Supplier") return (suppliers ?? []).find((s) => s.id === l.referenceId)?.name ?? "";
+    return "";
+  };
 
-    return () => { unsubLedgers(); unsubFact(); unsubCust(); unsubSupp(); };
-  }, []);
+  const rows = useMemo(() => {
+    const list = (ledgers ?? []).filter((l) => l.type === tab);
+    const q = search.trim().toLowerCase();
+    if (!q) return list;
+    return list.filter((l) => {
+      const name = entityName(l);
+      return (
+        l.description.toLowerCase().includes(q) ||
+        name.toLowerCase().includes(q) ||
+        (l.transactionId ?? "").toLowerCase().includes(q)
+      );
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ledgers, tab, search, factories, customers, suppliers]);
 
-  const handleRecordPayment = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!paymentType || !paymentEntityId || !paymentAmount) return;
+  const balance = useMemo(() => {
+    const cash = (ledgers ?? []).filter((l) => l.type === "Cash").reduce((s, l) => s + l.amount, 0);
+    const factory = (factories ?? []).reduce((s, f) => s + f.balance, 0);
+    const supplier = (suppliers ?? []).reduce((s, sp) => s + sp.balanceOwed, 0);
+    const customer = (customers ?? []).reduce((s, c) => s + c.balance, 0);
+    return { cash, factory, supplier, customer };
+  }, [ledgers, factories, suppliers, customers]);
 
+  const totalCredit = rows.filter((l) => l.amount > 0).reduce((s, l) => s + l.amount, 0);
+  const totalDebit = rows.filter((l) => l.amount < 0).reduce((s, l) => s + Math.abs(l.amount), 0);
+
+  const entityOptions =
+    tab === "Factory"
+      ? (factories ?? []).map((f) => ({ id: f.id, name: f.name, due: f.balance }))
+      : tab === "Supplier"
+        ? (suppliers ?? []).map((s) => ({ id: s.id, name: s.name, due: s.balanceOwed }))
+        : (customers ?? []).map((c) => ({ id: c.id, name: c.name, due: c.balance }));
+
+  const recordPayment = async () => {
+    if (!payment.entityId || Number(payment.amount) <= 0) {
+      toast.error("Select an account and enter a valid amount");
+      return;
+    }
+    setSaving(true);
     try {
-      const batch = writeBatch(db);
-      const ledgerRef = doc(collection(db, "ledgers"));
-      const cashRef = doc(collection(db, "ledgers"));
-
-      if (paymentType === 'Factory') {
-        batch.set(ledgerRef, {
-          type: 'Factory',
-          referenceId: paymentEntityId,
-          amount: -Number(paymentAmount),
-          date: new Date(),
-          description: `Payment to factory`
-        }, err => console.warn(err));
-        batch.set(cashRef, {
-          type: 'Cash',
-          amount: -Number(paymentAmount),
-          date: new Date(),
-          description: `Payment to factory`
-        }, err => console.warn(err));
-        
-        const factRef = doc(db, "factories", paymentEntityId);
-        batch.update(factRef, { balance: increment(-Number(paymentAmount)) });
-
-      } else if (paymentType === 'Supplier') {
-        batch.set(ledgerRef, {
-          type: 'Supplier',
-          referenceId: paymentEntityId,
-          amount: -Number(paymentAmount),
-          date: new Date(),
-          description: `Payment to supplier`
-        }, err => console.warn(err));
-        batch.set(cashRef, {
-          type: 'Cash',
-          amount: -Number(paymentAmount),
-          date: new Date(),
-          description: `Payment to supplier`
-        }, err => console.warn(err));
-        
-        const suppRef = doc(db, "suppliers", paymentEntityId);
-        batch.update(suppRef, { balanceOwed: increment(-Number(paymentAmount)) });
-
-      } else {
-        batch.set(ledgerRef, {
-          type: 'Customer',
-          referenceId: paymentEntityId,
-          amount: -Number(paymentAmount), 
-          date: new Date(),
-          description: `Payment received from customer`
-        }, err => console.warn(err));
-        batch.set(cashRef, {
-          type: 'Cash',
-          amount: Number(paymentAmount), 
-          date: new Date(),
-          description: `Payment received from customer`
-        }, err => console.warn(err));
-
-        const custRef = doc(db, "customers", paymentEntityId);
-        batch.update(custRef, { balance: increment(-Number(paymentAmount)) });
-
-        // Distribute payment to unpaid invoices (FIFO)
-        const invoicesSnap = await getDocs(
-          query(collection(db, "wholesale_invoices"), 
-          where("customerId", "==", paymentEntityId),
-          where("status", "!=", "Paid"))
-        );
-        
-        let remainingPayment = Number(paymentAmount);
-        
-        // Sort by date manually as we have an inequality filter on status
-        const unpaidInvoices = invoicesSnap.docs.map(d => ({ id: d.id, ...d.data() } as WholesaleInvoice))
-          .sort((a, b) => {
-            const dateA = (a.date as any).seconds || a.date;
-            const dateB = (b.date as any).seconds || b.date;
-            return dateA - dateB;
-          }, err => console.warn(err));
-
-        for (const inv of unpaidInvoices) {
-          if (remainingPayment <= 0) break;
-          const dueOnInvoice = inv.totalAmount - inv.paidAmount;
-          if (dueOnInvoice > 0) {
-            const amountToApply = Math.min(dueOnInvoice, remainingPayment);
-            const newPaidAmount = inv.paidAmount + amountToApply;
-            let newStatus = inv.status;
-            if (newPaidAmount >= inv.totalAmount) newStatus = 'Paid';
-            else if (newPaidAmount > 0) newStatus = 'Partial';
-            
-            const invRef = doc(db, "wholesale_invoices", inv.id!);
-            batch.update(invRef, {
-              paidAmount: newPaidAmount,
-              status: newStatus
-            }, err => console.warn(err));
-            remainingPayment -= amountToApply;
-          }
-        }
-      }
-
-      await batch.commit();
-      setPaymentType(null);
-      setPaymentEntityId('');
-      setPaymentAmount(0);
-    } catch (err) {
-      console.error(err);
+      await businessApi.payment({ type: payment.type, entityId: payment.entityId, amount: Number(payment.amount) });
+      toast.success("Payment recorded");
+      setPayOpen(false);
+      setPayment(emptyPayment);
+      refresh();
+      refreshFactories();
+      refreshCustomers();
+      refreshSuppliers();
+    } catch (e: any) {
+      toast.error(e?.message ?? "Payment failed");
+    } finally {
+      setSaving(false);
     }
   };
 
-  const filteredLedgers = ledgers.filter(l => l.type === activeTab && 
-    (l.description.toLowerCase().includes(search.toLowerCase()) || 
-     (l.referenceId && (factories.find(f => f.id === l.referenceId)?.name.toLowerCase().includes(search.toLowerCase()) || 
-      customers.find(c => c.id === l.referenceId)?.name.toLowerCase().includes(search.toLowerCase())))
-    )
-  );
-
-  // Calculate balances based on ledgers
-  const calculateBalance = (type: 'Factory' | 'Customer', refId: string) => {
-    const entries = ledgers.filter(l => l.type === type && l.referenceId === refId);
-    return entries.reduce((sum, item) => sum + item.amount, 0);
+  const tabLabel: Record<TabKey, string> = {
+    Cash: `Cash Book (${formatCurrency(balance.cash)})`,
+    Factory: `Factory Ledgers (${formatCurrency(balance.factory)})`,
+    Customer: `Customer Ledgers (${formatCurrency(balance.customer)})`,
+    Supplier: `Supplier Ledgers (${formatCurrency(balance.supplier)})`,
   };
 
-  const cashBalance = ledgers.filter(l => l.type === 'Cash').reduce((sum, item) => sum + item.amount, 0);
-
-  const formatDate = (ts: any) => {
-    if (!ts) return 'N/A';
-    if (ts.seconds) return format(new Date(ts.seconds * 1000), 'MMM d, yyyy HH:mm');
-    return format(new Date(ts), 'MMM d, yyyy HH:mm');
-  }
-
   return (
-    <div className="space-y-6 flex flex-col h-full">
-      <div className="flex justify-between items-center shrink-0">
-        <h1 className="text-2xl font-bold text-neutral-900">Ledgers & Accounts</h1>
-        
-        <div className="flex gap-2">
-          <Button variant={activeTab === 'Cash' ? 'default' : 'outline'} onClick={() => setActiveTab('Cash')}>
-            Cash Book ({formatCurrency(cashBalance)})
-          </Button>
-          <Button variant={activeTab === 'Factory' ? 'default' : 'outline'} onClick={() => setActiveTab('Factory')}>
-            Factory Ledgers
-          </Button>
-          <Button variant={activeTab === 'Customer' ? 'default' : 'outline'} onClick={() => setActiveTab('Customer')}>
-            Customer Ledgers
-          </Button>
-          <Button variant={activeTab === 'Supplier' ? 'default' : 'outline'} onClick={() => setActiveTab('Supplier')}>
-            Supplier Ledgers
-          </Button>
-        </div>
-      </div>
+    <Box>
+      <PageHeader
+        title="Ledgers & Accounts"
+        subtitle="Cash book and running balances for factories, customers and suppliers"
+        actionLabel="Record Payment"
+        onAction={() => setPayOpen(true)}
+      />
 
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-6 shrink-0">
-        <Card className="md:col-span-3">
-          <div className="p-4 border-b border-neutral-200 flex justify-between items-center bg-white">
-            <h2 className="font-semibold text-lg">{activeTab} Ledger Entries</h2>
-            <Input 
-              placeholder="Search description or name..." 
-              value={search} 
-              onChange={e => setSearch(e.target.value)}
-              className="w-64 h-9"
-            />
-          </div>
-          <div className="overflow-y-auto max-h-[500px]">
-            <table className="w-full text-sm text-left">
-              <thead className="bg-neutral-50 text-neutral-600 font-medium sticky top-0 border-b border-neutral-200">
-                <tr>
-                  <th className="px-6 py-3">Date</th>
-                  {activeTab !== 'Cash' && <th className="px-6 py-3">Entity</th>}
-                  <th className="px-6 py-3">Description</th>
-                  {activeTab === 'Cash' ? (
+      <Paper variant="outlined" sx={{ mb: 2 }}>
+        <Tabs value={tab} onChange={(_, v) => setTab(v)} variant="fullWidth">
+          {(["Cash", "Factory", "Customer", "Supplier"] as TabKey[]).map((t) => (
+            <Tab key={t} label={tabLabel[t]} value={t} />
+          ))}
+        </Tabs>
+      </Paper>
+
+      <Stack direction="row" spacing={1} sx={{ justifyContent: "space-between", alignItems: "center", mb: 2 }}>
+        <Stack direction="row" spacing={1}>
+          <Chip label={`In (+): ${formatCurrency(totalCredit)}`} color="success" variant="outlined" />
+          <Chip label={`Out (−): ${formatCurrency(totalDebit)}`} color="error" variant="outlined" />
+        </Stack>
+        <TextField
+          placeholder="Search description or name..."
+          size="small"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          sx={{ width: 280 }}
+          slotProps={{
+            input: {
+              startAdornment: (
+                <InputAdornment position="start">
+                  <Search fontSize="small" />
+                </InputAdornment>
+              ),
+            },
+          }}
+        />
+      </Stack>
+
+      <Paper variant="outlined">
+        <TableContainer sx={{ maxHeight: 560 }}>
+          <Table size="small" stickyHeader>
+            <TableHead>
+              <TableRow>
+                <TableCell>Date</TableCell>
+                {tab !== "Cash" && <TableCell>Entity</TableCell>}
+                <TableCell>Description</TableCell>
+                <TableCell>Ref</TableCell>
+                {tab === "Cash" ? (
+                  <>
+                    <TableCell align="right">In (+)</TableCell>
+                    <TableCell align="right">Out (−)</TableCell>
+                  </>
+                ) : (
+                  <TableCell align="right">Amount</TableCell>
+                )}
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {loading && (
+                <TableRow>
+                  <TableCell colSpan={6} sx={{ py: 2 }}>
+                    <Loader loading rows={4} />
+                  </TableCell>
+                </TableRow>
+              )}
+              {!loading && rows.map((l) => (
+                <TableRow key={l.id} hover>
+                  <TableCell sx={{ whiteSpace: "nowrap" }}>{formatDate(l.date, true)}</TableCell>
+                  {tab !== "Cash" && <TableCell sx={{ fontWeight: 500 }}>{entityName(l) || "Unknown"}</TableCell>}
+                  <TableCell>{l.description}</TableCell>
+                  <TableCell>{l.transactionId ? <Chip label={l.transactionId} size="small" variant="outlined" /> : "—"}</TableCell>
+                  {tab === "Cash" ? (
                     <>
-                      <th className="px-6 py-3 text-right">In (+)</th>
-                      <th className="px-6 py-3 text-right">Out (-)</th>
+                      <TableCell align="right" sx={{ color: "success.main", fontWeight: 600 }}>
+                        {l.amount > 0 ? formatCurrency(l.amount) : ""}
+                      </TableCell>
+                      <TableCell align="right" sx={{ color: "error.main", fontWeight: 600 }}>
+                        {l.amount < 0 ? formatCurrency(Math.abs(l.amount)) : ""}
+                      </TableCell>
                     </>
                   ) : (
-                    <th className="px-6 py-3 text-right">Amount</th>
+                    <TableCell align="right" sx={{ fontWeight: 600, color: l.amount > 0 ? "error.main" : "success.main" }}>
+                      {l.amount > 0 ? "+" : "-"}{formatCurrency(Math.abs(l.amount))}
+                    </TableCell>
                   )}
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-neutral-200">
-                {filteredLedgers.map(l => {
-                  const name = activeTab === 'Factory' ? factories.find(f => f.id === l.referenceId)?.name : 
-                               activeTab === 'Customer' ? customers.find(c => c.id === l.referenceId)?.name :
-                               activeTab === 'Supplier' ? suppliers.find(s => s.id === l.referenceId)?.name : '';
-                  return (
-                    <tr key={l.id} className="hover:bg-neutral-50">
-                      <td className="px-6 py-3 whitespace-nowrap text-neutral-500">{formatDate(l.date)}</td>
-                      {activeTab !== 'Cash' && <td className="px-6 py-3 font-medium">{name || 'Unknown'}</td>}
-                      <td className="px-6 py-3">{l.description}</td>
-                      
-                      {activeTab === 'Cash' ? (
-                        <>
-                          <td className="px-6 py-3 text-right text-green-600 font-medium">{l.amount > 0 ? formatCurrency(l.amount) : ''}</td>
-                          <td className="px-6 py-3 text-right text-red-600 font-medium">{l.amount < 0 ? formatCurrency(Math.abs(l.amount)) : ''}</td>
-                        </>
-                      ) : (
-                        <td className={`px-6 py-3 text-right font-medium ${l.amount > 0 ? 'text-red-600' : 'text-green-600'}`}>
-                          {l.amount > 0 ? '+' : '-'}{formatCurrency(Math.abs(l.amount))}
-                        </td>
-                      )}
-                    </tr>
-                  )
-                })}
-                {filteredLedgers.length === 0 && (
-                  <tr>
-                    <td colSpan={5} className="px-6 py-8 text-center text-neutral-500">
-                      No entries found for {activeTab}.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </Card>
-
-        {/* Sidebar Balances & Payments */}
-        <div className="space-y-6">
-          <Card>
-            <div className="p-4 bg-neutral-900 text-white font-semibold rounded-t-lg">Record Payment</div>
-            <div className="p-4 space-y-4 bg-white rounded-b-lg">
-              <div>
-                <label className="block text-xs font-medium mb-1">Payment Type</label>
-                <select 
-                  className="w-full h-9 rounded-md border border-neutral-300 px-3 text-sm focus:ring-2 focus:ring-neutral-400"
-                  value={paymentType || ''}
-                  onChange={e => {setPaymentType(e.target.value as any); setPaymentEntityId('');}}
-                >
-                  <option value="">Select...</option>
-                  <option value="Factory">Pay Factory</option>
-                  <option value="Supplier">Pay Supplier</option>
-                  <option value="Customer">Receive from Customer</option>
-                </select>
-              </div>
-              
-              {paymentType && (
-                <>
-                  <div>
-                    <label className="block text-xs font-medium mb-1">{paymentType}</label>
-                    <select 
-                      className="w-full h-9 rounded-md border border-neutral-300 px-3 text-sm focus:ring-2 focus:ring-neutral-400"
-                      value={paymentEntityId}
-                      onChange={e => setPaymentEntityId(e.target.value)}
-                    >
-                      <option value="">Select {paymentType}...</option>
-                      {paymentType === 'Factory' ? 
-                        factories.map(f => <option key={f.id} value={f.id}>{f.name}</option>) :
-                       paymentType === 'Supplier' ?
-                        suppliers.map(s => <option key={s.id} value={s.id}>{s.name}</option>) :
-                        customers.map(c => <option key={c.id} value={c.id}>{c.name}</option>)
-                      }
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium mb-1">Amount (₨)</label>
-                    <Input type="number" min="0" step="0.01" value={paymentAmount} onChange={e => setPaymentAmount(Number(e.target.value))} className="h-9" />
-                  </div>
-                  <Button className="w-full" onClick={handleRecordPayment} disabled={!paymentEntityId || !paymentAmount}>
-                    Record {paymentType === 'Customer' ? 'Receipt' : 'Payment'}
-                  </Button>
-                </>
+                </TableRow>
+              ))}
+              {!loading && rows.length === 0 && (
+                <TableRow>
+                  <TableCell colSpan={6} sx={{ py: 6, textAlign: "center", color: "text.secondary" }}>
+                    No {tab.toLowerCase()} ledger entries found.
+                  </TableCell>
+                </TableRow>
               )}
-            </div>
-          </Card>
+            </TableBody>
+          </Table>
+        </TableContainer>
+        {!loading && (ledgers ?? []).length === 0 && (
+          <EmptyState message="No ledger entries yet — purchases, sales and payments create them automatically." />
+        )}
+      </Paper>
 
-          {activeTab !== 'Cash' && (
-            <Card>
-              <div className="p-4 bg-neutral-100 font-semibold rounded-t-lg border-b">
-                Running Balances
-              </div>
-              <div className="p-4 space-y-3 bg-white rounded-b-lg max-h-[300px] overflow-y-auto">
-                {(activeTab === 'Factory' ? factories : activeTab === 'Supplier' ? suppliers : customers).map(entity => {
-                  const bal = activeTab === 'Supplier' ? (entity as Supplier).balanceOwed : (entity as any).balance;
-                  if (bal === 0) return null;
-                  return (
-                    <div key={entity.id} className="flex justify-between items-center text-sm">
-                      <span className="font-medium truncate pr-2">{entity.name}</span>
-                      <span className={`font-semibold shrink-0 ${activeTab === 'Factory' || activeTab === 'Supplier' ? 'text-red-600' : 'text-green-600'}`}>
-                        {formatCurrency(bal)}
-                      </span>
-                    </div>
-                  );
-                })}
-              </div>
-            </Card>
-          )}
-        </div>
-      </div>
-    </div>
+      <Dialog open={payOpen} onClose={() => setPayOpen(false)} maxWidth="sm" fullWidth>
+        <DialogTitle>Record Payment</DialogTitle>
+        <DialogContent dividers>
+          <Stack spacing={2.5}>
+            <TextField
+              select
+              label="Payment Type"
+              value={payment.type}
+              onChange={(e) => setPayment({ ...payment, type: e.target.value as any, entityId: "" })}
+              fullWidth
+            >
+              <MenuItem value="Factory">Pay Factory</MenuItem>
+              <MenuItem value="Supplier">Pay Supplier</MenuItem>
+              <MenuItem value="Customer">Receive from Customer</MenuItem>
+            </TextField>
+            <TextField
+              select
+              label={payment.type === "Customer" ? "Customer" : payment.type === "Factory" ? "Factory" : "Supplier"}
+              value={payment.entityId}
+              onChange={(e) => setPayment({ ...payment, entityId: e.target.value })}
+              fullWidth
+            >
+              <MenuItem value="">-- Select --</MenuItem>
+              {entityOptions.map((e) => (
+                <MenuItem key={e.id} value={e.id}>
+                  {e.name} ({formatCurrency(e.due)})
+                </MenuItem>
+              ))}
+            </TextField>
+            <TextField
+              label="Amount (₨)"
+              type="number"
+              slotProps={{ htmlInput: { min: 0, step: 0.01 } }}
+              value={payment.amount}
+              onChange={(e) => setPayment({ ...payment, amount: e.target.value })}
+              fullWidth
+            />
+            <Typography variant="caption" color="text.secondary">
+              Customer payments are allocated to unpaid invoices oldest-first (FIFO). Factory and supplier payments reduce their balances.
+            </Typography>
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setPayOpen(false)} color="inherit">Cancel</Button>
+          <Button onClick={recordPayment} variant="contained" startIcon={<Payments />} disabled={saving}>
+            {saving ? "Processing..." : "Record Payment"}
+          </Button>
+        </DialogActions>
+      </Dialog>
+    </Box>
   );
 }

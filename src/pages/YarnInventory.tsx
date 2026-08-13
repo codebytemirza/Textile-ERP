@@ -1,231 +1,586 @@
-import { formatCurrency } from "../lib/utils";
-import { useState, useEffect } from "react";
-import { collection, query, orderBy, onSnapshot, addDoc, doc, updateDoc, writeBatch, increment } from "firebase/firestore";
-import { db } from "../lib/firebase";
-import { YarnInventory, Supplier } from "../types";
-import { Button, Card, CardContent, CardHeader, CardTitle, Input } from "../components/ui";
-import { format } from "date-fns";
-import { Plus } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import {
+  Box,
+  Button,
+  Chip,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  Grid,
+  IconButton,
+  InputAdornment,
+  MenuItem,
+  Paper,
+  Stack,
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TableRow,
+  TextField,
+  ToggleButton,
+  ToggleButtonGroup,
+  Tooltip,
+  Typography,
+} from "@mui/material";
+import { Delete, Edit, Add, Straighten, LocalShipping } from "@mui/icons-material";
+import { collectionApi, businessApi } from "../api";
+import { useCollection } from "../lib/useCollection";
+import { useToast } from "../contexts/ToastContext";
+import { ConfirmDialog } from "../components/ConfirmDialog";
+import { PageHeader, EmptyState, Loader } from "../components/PageHeader";
+import type { Supplier, WeightUnit, YarnInventory } from "../types";
+import { formatCurrency, formatDate, KG_PER_LBS, kgToLbs, lbsToKg, round } from "../lib/utils";
+
+interface PurchaseForm {
+  supplierId: string;
+  yarnType: string;
+  quantity: string;
+  unit: WeightUnit;
+  ratePerKg: string;
+  paymentStatus: string;
+  paidAmount: string;
+}
+
+const emptyForm: PurchaseForm = {
+  supplierId: "",
+  yarnType: "",
+  quantity: "",
+  unit: "kg",
+  ratePerKg: "",
+  paymentStatus: "Unpaid",
+  paidAmount: "0",
+};
 
 export function YarnInventoryPage() {
-  const [inventory, setInventory] = useState<YarnInventory[]>([]);
-  const [suppliers, setSuppliers] = useState<Supplier[]>([]);
-  const [isAdding, setIsAdding] = useState(false);
-  const [formData, setFormData] = useState<Partial<YarnInventory>>({
-    supplierId: '', yarnType: '', quantityKg: 0, ratePerKg: 0, paymentStatus: 'Unpaid'
-  });
-  const [newSupplierName, setNewSupplierName] = useState("");
+  const toast = useToast();
+  const { data: inventory, loading, refresh } = useCollection<YarnInventory>(
+    () => collectionApi<YarnInventory>("yarn_inventory").list(),
+    []
+  );
+  const { data: suppliers, loading: suppliersLoading, refresh: refreshSuppliers } = useCollection<Supplier>(() => collectionApi<Supplier>("suppliers").list(), []);
+
+  const [displayUnit, setDisplayUnit] = useState<WeightUnit>("kg");
+  const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState<YarnInventory | null>(null);
+  const [form, setForm] = useState<PurchaseForm>(emptyForm);
+  const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState<YarnInventory | null>(null);
+
+  const [suppliersOpen, setSuppliersOpen] = useState(false);
+  const [supplierForm, setSupplierForm] = useState<{ name: string; contact: string }>({ name: "", contact: "" });
+  const [editingSupplier, setEditingSupplier] = useState<Supplier | null>(null);
+  const [deletingSupplier, setDeletingSupplier] = useState<Supplier | null>(null);
+  const [supplierSaving, setSupplierSaving] = useState(false);
 
   useEffect(() => {
-    const unsubYarn = onSnapshot(query(collection(db, "yarn_inventory"), orderBy("purchaseDate", "desc")), (snapshot) => {
-      const items: YarnInventory[] = [];
-      snapshot.forEach((doc) => items.push({ id: doc.id, ...doc.data() } as YarnInventory));
-      setInventory(items);
-    }, (err) => console.warn(err));
-    
-    const unsubSupp = onSnapshot(collection(db, "suppliers"), (snapshot) => {
-      setSuppliers(snapshot.docs.map(d => ({ id: d.id, ...d.data() } as Supplier)));
-    }, (err) => console.warn(err));
+    if (open && !editing) setForm(emptyForm);
+  }, [open, editing]);
 
-    return () => { unsubYarn(); unsubSupp(); };
-  }, []);
+  const totals = useMemo(() => {
+    const totalKg = (inventory ?? []).reduce((s, y) => s + (y.quantityKg ?? 0), 0);
+    const totalLbs = (inventory ?? []).reduce((s, y) => s + (y.quantityLbs ?? 0), 0);
+    const balanceKg = (inventory ?? []).reduce((s, y) => s + (y.balanceKg ?? 0), 0);
+    const balanceLbs = (inventory ?? []).reduce((s, y) => s + (y.balanceLbs ?? 0), 0);
+    const value = (inventory ?? []).reduce((s, y) => s + (y.balanceKg ?? 0) * (y.ratePerKg ?? 0), 0);
+    return { totalKg, totalLbs, balanceKg, balanceLbs, value };
+  }, [inventory]);
 
-  const handleCreateSupplier = async () => {
-    if (!newSupplierName) return;
-    const batch = writeBatch(db);
-    const suppRef = doc(collection(db, "suppliers"));
-    batch.set(suppRef, { name: newSupplierName, contact: '', balanceOwed: 0 });
-    await batch.commit();
-    setNewSupplierName("");
+  const openCreate = () => {
+    setEditing(null);
+    setForm(emptyForm);
+    setOpen(true);
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!formData.supplierId || !formData.yarnType || !formData.quantityKg || !formData.ratePerKg) return;
+  const openEdit = (row: YarnInventory) => {
+    setEditing(row);
+    setForm({
+      supplierId: row.supplierId ?? "",
+      yarnType: row.yarnType,
+      quantity: String(row.unit === "lbs" ? row.quantityLbs : row.quantityKg),
+      unit: row.unit ?? "kg",
+      ratePerKg: String(row.unit === "lbs" ? row.ratePerKg / KG_PER_LBS : row.ratePerKg),
+      paymentStatus: row.paymentStatus,
+      paidAmount: "0",
+    });
+    setOpen(true);
+  };
 
-    const supplier = suppliers.find(s => s.id === formData.supplierId);
-    if (!supplier) return;
-
-    const totalCost = Number(formData.quantityKg) * Number(formData.ratePerKg);
-    const amountPaid = formData.paymentStatus === 'Paid' ? totalCost : (formData.paymentStatus === 'Partial' ? totalCost / 2 : 0);
-    const balanceOwed = totalCost - amountPaid;
-
-    const newEntry = {
-      ...formData,
-      supplierName: supplier.name,
-      quantityKg: Number(formData.quantityKg),
-      ratePerKg: Number(formData.ratePerKg),
-      totalCost,
-      balanceKg: Number(formData.quantityKg),
-      purchaseDate: new Date(),
-    };
-
+  const handleSave = async () => {
+    if (!form.supplierId || !form.yarnType || !form.quantity || !form.ratePerKg) {
+      toast.error("Please fill all required fields");
+      return;
+    }
+    if (Number(form.quantity) <= 0) {
+      toast.error("Quantity must be greater than zero");
+      return;
+    }
+    setSaving(true);
     try {
-      const batch = writeBatch(db);
-      
-      const yarnRef = doc(collection(db, "yarn_inventory"));
-      batch.set(yarnRef, newEntry);
-      
-      // Update supplier balance
-      if (balanceOwed > 0) {
-        const suppRef = doc(db, "suppliers", formData.supplierId);
-        batch.update(suppRef, { balanceOwed: increment(balanceOwed) });
-      }
-
-      // Ledger entries
-      const ledgerRef = doc(collection(db, "ledgers"));
-      batch.set(ledgerRef, {
-        type: 'Supplier',
-        referenceId: formData.supplierId,
-        transactionId: yarnRef.id,
-        amount: balanceOwed, // Positive means we owe them
-        date: new Date(),
-        description: `Yarn Purchase: ${formData.yarnType}`
-      });
-
-      if (amountPaid > 0) {
-        const cashRef = doc(collection(db, "ledgers"));
-        batch.set(cashRef, {
-          type: 'Cash',
-          amount: -amountPaid,
-          date: new Date(),
-          description: `Payment to ${supplier.name} for Yarn ${formData.yarnType}`
+      if (editing) {
+        const quantityKg = form.unit === "lbs" ? lbsToKg(Number(form.quantity)) : Number(form.quantity);
+        const ratePerKg = form.unit === "lbs" ? Number(form.ratePerKg) * KG_PER_LBS : Number(form.ratePerKg);
+        await collectionApi<YarnInventory>("yarn_inventory").update(editing.id, {
+          supplierId: form.supplierId,
+          supplierName: suppliers?.find((s) => s.id === form.supplierId)?.name ?? editing.supplierName,
+          yarnType: form.yarnType,
+          ratePerKg: round(ratePerKg),
+          totalCost: round(quantityKg * ratePerKg),
+          unit: form.unit,
         });
+        toast.success("Yarn entry updated");
+      } else {
+        await businessApi.yarnPurchase({
+          supplierId: form.supplierId,
+          yarnType: form.yarnType,
+          quantity: Number(form.quantity),
+          unit: form.unit,
+          ratePerKg: form.unit === "lbs" ? Number(form.ratePerKg) * KG_PER_LBS : Number(form.ratePerKg),
+          paymentStatus: form.paymentStatus,
+          paidAmount: Number(form.paidAmount || 0),
+        });
+        toast.success("Yarn purchase recorded");
       }
-
-      await batch.commit();
-      setIsAdding(false);
-      setFormData({ supplierId: '', yarnType: '', quantityKg: 0, ratePerKg: 0, paymentStatus: 'Unpaid' });
-    } catch (err) {
-      console.error(err);
+      setOpen(false);
+      refresh();
+    } catch (e: any) {
+      toast.error(e?.message ?? "Failed to save");
+    } finally {
+      setSaving(false);
     }
   };
 
+  const handleDelete = async () => {
+    if (!deleting) return;
+    try {
+      await collectionApi<YarnInventory>("yarn_inventory").remove(deleting.id);
+      toast.success("Yarn entry deleted");
+      setDeleting(null);
+      refresh();
+    } catch (e: any) {
+      toast.error(e?.message ?? "Failed to delete");
+    }
+  };
+
+  const openAddSupplier = () => {
+    setEditingSupplier(null);
+    setSupplierForm({ name: "", contact: "" });
+    setSuppliersOpen(true);
+  };
+
+  const openEditSupplier = (s: Supplier) => {
+    setEditingSupplier(s);
+    setSupplierForm({ name: s.name, contact: s.contact });
+    setSuppliersOpen(true);
+  };
+
+  const saveSupplier = async () => {
+    if (!supplierForm.name.trim()) {
+      toast.error("Supplier name is required");
+      return;
+    }
+    setSupplierSaving(true);
+    try {
+      if (editingSupplier) {
+        await collectionApi<Supplier>("suppliers").update(editingSupplier.id, {
+          name: supplierForm.name.trim(),
+          contact: supplierForm.contact,
+        });
+        toast.success("Supplier updated");
+      } else {
+        await collectionApi<Supplier>("suppliers").create({
+          name: supplierForm.name.trim(),
+          contact: supplierForm.contact,
+          balanceOwed: 0,
+        });
+        toast.success("Supplier added");
+      }
+      setSuppliersOpen(false);
+      refreshSuppliers();
+    } catch (e: any) {
+      toast.error(e?.message ?? "Failed to save supplier");
+    } finally {
+      setSupplierSaving(false);
+    }
+  };
+
+  const removeSupplier = async () => {
+    if (!deletingSupplier) return;
+    try {
+      await collectionApi<Supplier>("suppliers").remove(deletingSupplier.id);
+      toast.success("Supplier deleted");
+      setDeletingSupplier(null);
+      refreshSuppliers();
+    } catch (e: any) {
+      toast.error(e?.message ?? "Failed to delete supplier");
+    }
+  };
+
+  const unitLabel = displayUnit === "kg" ? "kg" : "lbs";
+  const qtyOf = (y: YarnInventory) => (displayUnit === "kg" ? y.quantityKg : y.quantityLbs);
+  const balOf = (y: YarnInventory) => (displayUnit === "kg" ? y.balanceKg : y.balanceLbs);
+  const rateOf = (y: YarnInventory) => (displayUnit === "kg" ? y.ratePerKg : y.ratePerKg / KG_PER_LBS);
+
+  const calcTotalCost = useMemo(() => {
+    const qty = Number(form.quantity);
+    const rate =
+      form.unit === "lbs"
+        ? Number(form.ratePerKg) * KG_PER_LBS
+        : Number(form.ratePerKg);
+    if (!qty || qty <= 0 || !rate || rate <= 0) return 0;
+    const quantityKg = form.unit === "lbs" ? lbsToKg(qty) : qty;
+    return round(quantityKg * rate);
+  }, [form.quantity, form.ratePerKg, form.unit]);
+
+  const calcPaid = Math.min(calcTotalCost, Math.max(0, Number(form.paidAmount) || 0));
+
+  const derivedStatus = calcTotalCost === 0
+    ? "Pending"
+    : calcPaid >= calcTotalCost
+      ? "Paid"
+      : calcPaid > 0
+        ? "Partial"
+        : "Unpaid";
+
+  const statusChip = (s: string) => {
+    const color =
+      s === "Paid" ? "success" : s === "Partial" ? "warning" : "error";
+    return <Chip label={s} color={color} size="small" />;
+  };
+
   return (
-    <div className="space-y-6">
-      <div className="flex justify-between items-center">
-        <h1 className="text-2xl font-bold text-neutral-900">Yarn Inventory</h1>
-        <Button onClick={() => setIsAdding(!isAdding)}>
-          <Plus size={16} className="mr-2" /> Add Purchase
+    <Box>
+      <PageHeader
+        title="Yarn Inventory"
+        subtitle={`Stock value: ${formatCurrency(totals.value)}`}
+        actionLabel="Add Purchase"
+        onAction={openCreate}
+      >
+        <Button variant="outlined" startIcon={<LocalShipping />} onClick={openAddSupplier}>
+          Suppliers
         </Button>
-      </div>
+        <ToggleButtonGroup
+          value={displayUnit}
+          exclusive
+          onChange={(_, v) => v && setDisplayUnit(v)}
+          size="small"
+        >
+          <ToggleButton value="kg">kg</ToggleButton>
+          <ToggleButton value="lbs">lbs</ToggleButton>
+        </ToggleButtonGroup>
+      </PageHeader>
 
-      {isAdding && (
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          <Card className="lg:col-span-2">
-            <CardHeader>
-              <CardTitle>New Yarn Purchase</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <form onSubmit={handleSubmit} className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div className="col-span-1 md:col-span-2">
-                  <label className="block text-sm font-medium mb-1">Supplier</label>
-                  <select 
-                    className="flex h-10 w-full rounded-md border border-neutral-300 bg-transparent px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-neutral-400"
-                    value={formData.supplierId}
-                    onChange={e => setFormData({...formData, supplierId: e.target.value})}
-                    required
-                  >
-                    <option value="">-- Select Supplier --</option>
-                    {suppliers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-sm font-medium mb-1">Yarn Type/Quality</label>
-                  <Input value={formData.yarnType} onChange={e => setFormData({...formData, yarnType: e.target.value})} required />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium mb-1">Quantity (Kg)</label>
-                  <Input type="number" min="0" step="0.1" value={formData.quantityKg} onChange={e => setFormData({...formData, quantityKg: e.target.value})} required />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium mb-1">Rate per Kg</label>
-                  <Input type="number" min="0" step="0.01" value={formData.ratePerKg} onChange={e => setFormData({...formData, ratePerKg: e.target.value})} required />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium mb-1">Payment Status</label>
-                  <select 
-                    className="flex h-10 w-full rounded-md border border-neutral-300 bg-transparent px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-neutral-400"
-                    value={formData.paymentStatus}
-                    onChange={e => setFormData({...formData, paymentStatus: e.target.value as any})}
-                  >
-                    <option value="Paid">Paid</option>
-                    <option value="Partial">Partial</option>
-                    <option value="Unpaid">Unpaid</option>
-                  </select>
-                </div>
-                <div className="col-span-1 md:col-span-2 flex justify-end mt-4">
-                  <Button type="submit">Save Entry</Button>
-                </div>
-              </form>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardHeader>
-              <CardTitle>Quick Add Supplier</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-sm font-medium mb-1">Supplier Name</label>
-                  <Input value={newSupplierName} onChange={e => setNewSupplierName(e.target.value)} placeholder="e.g. Reliance Spinners" />
-                </div>
-                <Button onClick={handleCreateSupplier} variant="outline" className="w-full">Add Supplier</Button>
-              </div>
-            </CardContent>
-          </Card>
-        </div>
-      )}
+      <Grid container spacing={2} sx={{ mb: 2 }}>
+        <Grid size={{ xs: 6, md: 3 }}>
+          <Paper variant="outlined" sx={{ p: 2 }}>
+            <Typography variant="body2" color="text.secondary">Total Purchased</Typography>
+            <Typography variant="h6" sx={{ fontWeight: 700 }}>
+              {displayUnit === "kg" ? round(totals.totalKg) : round(totals.totalLbs)} {unitLabel}
+            </Typography>
+          </Paper>
+        </Grid>
+        <Grid size={{ xs: 6, md: 3 }}>
+          <Paper variant="outlined" sx={{ p: 2 }}>
+            <Typography variant="body2" color="text.secondary">Balance Available</Typography>
+            <Typography variant="h6" sx={{ fontWeight: 700, color: "primary" }}>
+              {displayUnit === "kg" ? round(totals.balanceKg) : round(totals.balanceLbs)} {unitLabel}
+            </Typography>
+          </Paper>
+        </Grid>
+      </Grid>
 
-      <Card>
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm text-left">
-            <thead className="bg-neutral-50 text-neutral-600 font-medium border-b border-neutral-200">
-              <tr>
-                <th className="px-6 py-3">Date</th>
-                <th className="px-6 py-3">Supplier</th>
-                <th className="px-6 py-3">Yarn Type</th>
-                <th className="px-6 py-3 text-right">Quantity (Kg)</th>
-                <th className="px-6 py-3 text-right">Balance (Kg)</th>
-                <th className="px-6 py-3 text-right">Rate</th>
-                <th className="px-6 py-3 text-right">Total Cost</th>
-                <th className="px-6 py-3">Payment</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-neutral-200">
-              {inventory.map(item => (
-                <tr key={item.id} className="hover:bg-neutral-50">
-                  <td className="px-6 py-4">
-                    {item.purchaseDate?.seconds ? format(new Date(item.purchaseDate.seconds * 1000), 'MMM d, yyyy') : 'N/A'}
-                  </td>
-                  <td className="px-6 py-4">{item.supplierName}</td>
-                  <td className="px-6 py-4">{item.yarnType}</td>
-                  <td className="px-6 py-4 text-right">{item.quantityKg}</td>
-                  <td className="px-6 py-4 text-right font-medium text-blue-600">{item.balanceKg}</td>
-                  <td className="px-6 py-4 text-right">{formatCurrency(item.ratePerKg)}</td>
-                  <td className="px-6 py-4 text-right">{formatCurrency(item.totalCost)}</td>
-                  <td className="px-6 py-4">
-                    <span className={
-                      item.paymentStatus === 'Paid' ? 'text-green-600 bg-green-50 px-2 py-1 rounded-full text-xs font-medium' :
-                      item.paymentStatus === 'Partial' ? 'text-yellow-600 bg-yellow-50 px-2 py-1 rounded-full text-xs font-medium' :
-                      'text-red-600 bg-red-50 px-2 py-1 rounded-full text-xs font-medium'
-                    }>
-                      {item.paymentStatus}
-                    </span>
-                  </td>
-                </tr>
-              ))}
-              {inventory.length === 0 && (
-                <tr>
-                  <td colSpan={8} className="px-6 py-8 text-center text-neutral-500">
-                    No yarn inventory found. Add a purchase to get started.
-                  </td>
-                </tr>
+      <Paper variant="outlined">
+        <TableContainer>
+          <Table size="small">
+            <TableHead>
+              <TableRow>
+                <TableCell>Date</TableCell>
+                <TableCell>Supplier</TableCell>
+                <TableCell>Yarn Type</TableCell>
+                <TableCell align="right">Quantity</TableCell>
+                <TableCell align="right">Balance</TableCell>
+                <TableCell align="right">Rate/{unitLabel}</TableCell>
+                <TableCell align="right">Total Cost</TableCell>
+                <TableCell>Payment</TableCell>
+                <TableCell align="right">Actions</TableCell>
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {loading && (
+                <TableRow>
+                  <TableCell colSpan={9} sx={{ py: 2 }}>
+                    <Loader loading rows={3} />
+                  </TableCell>
+                </TableRow>
               )}
-            </tbody>
-          </table>
-        </div>
-      </Card>
-    </div>
+              {!loading && (inventory ?? []).map((y) => (
+                <TableRow key={y.id} hover>
+                  <TableCell>{formatDate(y.purchaseDate)}</TableCell>
+                  <TableCell>{y.supplierName}</TableCell>
+                  <TableCell>{y.yarnType}</TableCell>
+                  <TableCell align="right">{round(qtyOf(y))} {unitLabel}</TableCell>
+                  <TableCell align="right" sx={{ fontWeight: 600, color: "primary.main" }}>
+                    {round(balOf(y))} {unitLabel}
+                  </TableCell>                  <TableCell align="right">{formatCurrency(rateOf(y))}</TableCell>
+                  <TableCell align="right">{formatCurrency(y.totalCost)}</TableCell>
+                  <TableCell>{statusChip(y.paymentStatus)}</TableCell>
+                  <TableCell align="right">
+                    <Stack direction="row" spacing={0.5} sx={{ justifyContent: "flex-end" }}>
+                      <Tooltip title="Edit">
+                        <IconButton size="small" onClick={() => openEdit(y)}>
+                          <Edit fontSize="small" />
+                        </IconButton>
+                      </Tooltip>
+                      <Tooltip title="Delete">
+                        <IconButton size="small" color="error" onClick={() => setDeleting(y)}>
+                          <Delete fontSize="small" />
+                        </IconButton>
+                      </Tooltip>
+                    </Stack>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </TableContainer>
+        {!loading && (inventory ?? []).length === 0 && (
+          <EmptyState message="No yarn inventory found. Add a purchase to get started." />
+        )}
+      </Paper>
+
+      <Dialog open={open} onClose={() => setOpen(false)} maxWidth="sm" fullWidth>
+        <DialogTitle>{editing ? "Edit Yarn Entry" : "New Yarn Purchase"}</DialogTitle>
+        <DialogContent dividers>
+          <Stack spacing={2.5}>
+            <TextField
+              select
+              label="Supplier"
+              value={form.supplierId}
+              onChange={(e) => setForm({ ...form, supplierId: e.target.value })}
+              required
+              fullWidth
+            >
+              <MenuItem value="">-- Select Supplier --</MenuItem>
+              {(suppliers ?? []).map((s) => (
+                <MenuItem key={s.id} value={s.id}>{s.name}</MenuItem>
+              ))}
+            </TextField>
+
+            <TextField
+              label="Yarn Type / Quality"
+              value={form.yarnType}
+              onChange={(e) => setForm({ ...form, yarnType: e.target.value })}
+              required
+              fullWidth
+            />
+
+            <Grid container spacing={2}>
+              <Grid size={{ xs: 7 }}>
+                <TextField
+                  label={`Quantity (${unitLabel})`}
+                  type="number"
+                  value={form.quantity}
+                  onChange={(e) => setForm({ ...form, quantity: e.target.value })}
+                  required
+                  fullWidth
+                  slotProps={{
+                    htmlInput: { min: 0, step: 0.1 },
+                    input: {
+                      endAdornment: (
+                        <ToggleButtonGroup
+                          size="small"
+                          exclusive
+                          value={form.unit}
+                          onChange={(_, v) => v && setForm({ ...form, unit: v })}
+                        >
+                          <ToggleButton value="kg">kg</ToggleButton>
+                          <ToggleButton value="lbs">lbs</ToggleButton>
+                        </ToggleButtonGroup>
+                      ),
+                    },
+                  }}
+                />
+              </Grid>
+              <Grid size={{ xs: 5 }}>
+                <TextField
+                  label={`Rate per ${form.unit} (₨)`}
+                  type="number"
+                  slotProps={{ htmlInput: { min: 0, step: 0.01 } }}
+                  value={form.ratePerKg}
+                  onChange={(e) => setForm({ ...form, ratePerKg: e.target.value })}
+                  required
+                  fullWidth
+                />
+              </Grid>
+            </Grid>
+
+            <Box sx={{ display: "flex", alignItems: "center", gap: 1, color: "text.secondary" }}>
+              <Straighten fontSize="small" />
+              <Typography variant="caption">
+                {form.quantity
+                  ? form.unit === "kg"
+                    ? `= ${round(kgToLbs(Number(form.quantity)))} lbs`
+                    : `= ${round(lbsToKg(Number(form.quantity)))} kg`
+                  : "Enter quantity to see conversion"}
+              </Typography>
+            </Box>
+
+            {!editing && (
+              <>
+                <Paper variant="outlined" sx={{ p: 1.5, bgcolor: "grey.50" }}>
+                  <Stack spacing={1}>
+                    <Stack direction="row" sx={{ justifyContent: "space-between", alignItems: "center" }}>
+                      <Typography variant="body2" color="text.secondary">Total Cost</Typography>
+                      <Typography variant="h6" sx={{ fontWeight: 800 }}>{formatCurrency(calcTotalCost)}</Typography>
+                    </Stack>
+                    <Grid container spacing={1.5}>
+                      <Grid size={{ xs: 6 }}>
+                        <TextField
+                          label="Amount Paid Now (₨)"
+                          type="number"
+                          value={form.paidAmount}
+                          onChange={(e) => setForm({ ...form, paidAmount: e.target.value })}
+                          fullWidth
+                          size="small"
+                          slotProps={{
+                            htmlInput: { min: 0, step: 0.01 },
+                            input: { startAdornment: <InputAdornment position="start">₨</InputAdornment> },
+                          }}
+                        />
+                        <Button
+                          size="small"
+                          sx={{ mt: 1 }}
+                          onClick={() => setForm({ ...form, paidAmount: String(calcTotalCost) })}
+                          disabled={calcTotalCost <= 0}
+                        >
+                          Pay full amount
+                        </Button>
+                      </Grid>
+                      <Grid size={{ xs: 6 }}>
+                        <Stack spacing={0.5}>
+                          <Stack direction="row" sx={{ justifyContent: "space-between" }}>
+                            <Typography variant="caption" color="text.secondary">Balance Owed</Typography>
+                            <Typography variant="body2" sx={{ fontWeight: 700 }}>{formatCurrency(Math.max(0, calcTotalCost - calcPaid))}</Typography>
+                          </Stack>
+                          <Stack direction="row" sx={{ justifyContent: "space-between" }}>
+                            <Typography variant="caption" color="text.secondary">Status</Typography>
+                            {derivedStatus === "Paid" ? statusChip("Paid") : derivedStatus === "Partial" ? statusChip("Partial") : statusChip("Unpaid")}
+                          </Stack>
+                        </Stack>
+                      </Grid>
+                    </Grid>
+                  </Stack>
+                </Paper>
+              </>
+            )}
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setOpen(false)} color="inherit">Cancel</Button>
+          <Button onClick={handleSave} variant="contained" disabled={saving}>
+            {saving ? "Saving..." : "Save"}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <ConfirmDialog
+        open={!!deleting}
+        title="Delete Yarn Entry"
+        message={`Delete "${deleting?.yarnType}" purchase? This cannot be undone.`}
+        onConfirm={handleDelete}
+        onClose={() => setDeleting(null)}
+      />
+
+      <Dialog open={suppliersOpen} onClose={() => setSuppliersOpen(false)} maxWidth="sm" fullWidth>
+        <DialogTitle>{editingSupplier ? "Edit Supplier" : "Add Supplier"}</DialogTitle>
+        <DialogContent dividers>
+          <Stack spacing={2} sx={{ mb: 3 }}>
+            <TextField
+              label="Supplier Name"
+              value={supplierForm.name}
+              onChange={(e) => setSupplierForm({ ...supplierForm, name: e.target.value })}
+              fullWidth
+              required
+              placeholder="e.g. Crescent Textile Mills"
+            />
+            <TextField
+              label="Contact"
+              value={supplierForm.contact}
+              onChange={(e) => setSupplierForm({ ...supplierForm, contact: e.target.value })}
+              fullWidth
+              placeholder="Phone / address"
+            />
+          </Stack>
+          <Stack direction="row" sx={{ justifyContent: "space-between", alignItems: "center", mb: 1 }}>
+            <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>Saved Suppliers</Typography>
+            <Button size="small" startIcon={<Add />} onClick={openAddSupplier}>New</Button>
+          </Stack>
+          <Paper variant="outlined">
+            <TableContainer>
+              <Table size="small">
+                <TableHead>
+                  <TableRow>
+                    <TableCell>Name</TableCell>
+                    <TableCell align="right">Balance Owed</TableCell>
+                    <TableCell align="right">Actions</TableCell>
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {suppliersLoading && (
+                    <TableRow>
+                      <TableCell colSpan={3} sx={{ py: 2 }}>
+                        <Loader loading rows={2} />
+                      </TableCell>
+                    </TableRow>
+                  )}
+                  {!suppliersLoading && (suppliers ?? []).map((s) => (
+                    <TableRow key={s.id} hover>
+                      <TableCell>
+                        <Typography variant="body2">{s.name}</Typography>
+                        <Typography variant="caption" color="text.secondary">{s.contact}</Typography>
+                      </TableCell>
+                      <TableCell align="right" sx={{ fontWeight: 600 }}>{formatCurrency(s.balanceOwed)}</TableCell>
+                      <TableCell align="right">
+                        <Stack direction="row" spacing={0.5} sx={{ justifyContent: "flex-end" }}>
+                          <IconButton size="small" onClick={() => openEditSupplier(s)}>
+                            <Edit fontSize="small" />
+                          </IconButton>
+                          <IconButton size="small" color="error" onClick={() => setDeletingSupplier(s)}>
+                            <Delete fontSize="small" />
+                          </IconButton>
+                        </Stack>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                  {(suppliers ?? []).length === 0 && (
+                    <TableRow>
+                      <TableCell colSpan={3} sx={{ py: 3, textAlign: "center", color: "text.secondary" }}>
+                        No suppliers yet. Add one above.
+                      </TableCell>
+                    </TableRow>
+                  )}
+                </TableBody>
+              </Table>
+            </TableContainer>
+          </Paper>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setSuppliersOpen(false)} color="inherit">Done</Button>
+          <Button onClick={saveSupplier} variant="contained" disabled={supplierSaving}>
+            {supplierSaving ? "Saving..." : editingSupplier ? "Save Changes" : "Add Supplier"}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <ConfirmDialog
+        open={!!deletingSupplier}
+        title="Delete Supplier"
+        message={`Delete "${deletingSupplier?.name}"? Existing yarn entries will retain the supplier name.`}
+        onConfirm={removeSupplier}
+        onClose={() => setDeletingSupplier(null)}
+      />
+    </Box>
   );
 }

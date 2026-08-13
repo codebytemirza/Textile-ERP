@@ -5,73 +5,96 @@ export interface User {
   email: string;
   role: Role;
   name: string;
+  createdAt?: number;
 }
 
+export type WeightUnit = 'kg' | 'lbs';
+
 export interface Supplier {
-  id?: string;
+  id: string;
   name: string;
   contact: string;
   balanceOwed: number;
+  createdAt?: number;
 }
 
 export interface YarnInventory {
-  id?: string;
+  id: string;
   supplierId?: string;
   supplierName: string;
   yarnType: string;
   quantityKg: number;
+  quantityLbs: number;
+  unit: WeightUnit;
   ratePerKg: number;
   totalCost: number;
-  purchaseDate: Date;
+  purchaseDate: number;
   paymentStatus: 'Paid' | 'Partial' | 'Unpaid';
   balanceKg: number;
+  balanceLbs: number;
+  createdAt?: number;
 }
 
 export interface Factory {
-  id?: string;
+  id: string;
   name: string;
   contact: string;
   type: 'Weaving' | 'Dyeing' | 'Both';
   balance: number;
+  createdAt?: number;
 }
 
-export type ProductionStatus = 
-  | 'Yarn Issued' 
-  | 'At Weaving' 
-  | 'Weaving Complete' 
-  | 'Sent for Dyeing' 
-  | 'Dyeing Complete' 
+export type ProductionStatus =
+  | 'Yarn Issued'
+  | 'At Weaving'
+  | 'Weaving Complete'
+  | 'Sent for Dyeing'
+  | 'Dyeing Complete'
   | 'Received in Stock';
 
 export interface ProductionLot {
-  id?: string;
+  id: string;
   lotNumber: string;
   yarnId: string;
-  quantityIssued: number;
+  quantityIssuedKg: number;
   factoryId: string;
-  dateSent: Date;
+  dateSent: number;
   expectedFabricMeters: number;
   status: ProductionStatus;
   weavingCharges: number;
   dyeingCharges: number;
+  weavingMeters: number | null;
+  dyeingMeters: number | null;
+  dyeingFactoryId?: string | null;
   actualFabricMeters: number | null;
   totalCost: number | null;
   costPerMeter: number | null;
+  createdAt?: number;
 }
 
 export interface FinishedFabric {
-  id?: string;
+  id: string;
   lotId: string;
   fabricType: string;
   quantityMeters: number;
   costPerMeter: number;
+  createdAt?: number;
 }
 
 export interface Customer {
-  id?: string;
+  id: string;
   name: string;
   contact: string;
   balance: number;
+  createdAt?: number;
+}
+
+export interface Store {
+  id: string;
+  name: string;
+  address?: string;
+  active: boolean;
+  createdAt?: number;
 }
 
 export interface RetailSaleItem {
@@ -82,8 +105,8 @@ export interface RetailSaleItem {
 }
 
 export interface RetailSale {
-  id?: string;
-  date: Date;
+  id: string;
+  date: number;
   totalAmount: number;
   paymentMethod: 'Cash' | 'Card' | 'Mobile';
   shopLocation: string;
@@ -98,22 +121,22 @@ export interface WholesaleInvoiceItem {
 }
 
 export interface WholesaleInvoice {
-  id?: string;
+  id: string;
   customerId: string;
-  date: Date;
+  date: number;
   totalAmount: number;
   paidAmount: number;
   status: 'Paid' | 'Partial' | 'Unpaid';
-  dueDate: Date;
+  dueDate: number;
   items: WholesaleInvoiceItem[];
 }
 
 export interface LedgerEntry {
-  id?: string;
+  id: string;
   type: 'Factory' | 'Customer' | 'Cash' | 'Supplier';
-  referenceId?: string; 
+  referenceId?: string;
   transactionId?: string;
   amount: number;
-  date: Date;
+  date: number;
   description: string;
 }

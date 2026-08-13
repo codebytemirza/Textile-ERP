@@ -1,241 +1,227 @@
-import { formatCurrency } from "../lib/utils";
-import { useState, useEffect } from "react";
-import { collection, query, onSnapshot, doc, writeBatch } from "firebase/firestore";
-import { db } from "../lib/firebase";
-import { YarnInventory, ProductionLot, FinishedFabric, RetailSale, WholesaleInvoice, Customer, Factory, Supplier } from "../types";
-import { Card, CardContent, CardHeader, CardTitle, Button } from "../components/ui";
+import { useEffect, useState } from "react";
+import {
+  Box,
+  Card,
+  CardContent,
+  Grid,
+  LinearProgress,
+  Paper,
+  Stack,
+  Typography,
+} from "@mui/material";
+import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Legend,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 import { Package, Factory as FactoryIcon, Layers, TrendingUp, Coins } from "lucide-react";
-import { useAuth } from "../contexts/AuthContext";
+import { dashboardApi, type DashboardData } from "../api";
+import { formatCurrency, formatDate } from "../lib/utils";
 
 export function Dashboard() {
-  const { user } = useAuth();
-  const [yarn, setYarn] = useState<YarnInventory[]>([]);
-  const [lots, setLots] = useState<ProductionLot[]>([]);
-  const [fabrics, setFabrics] = useState<FinishedFabric[]>([]);
-  const [retail, setRetail] = useState<RetailSale[]>([]);
-  const [wholesale, setWholesale] = useState<WholesaleInvoice[]>([]);
-  const [customers, setCustomers] = useState<Customer[]>([]);
-  const [factories, setFactories] = useState<Factory[]>([]);
-  const [suppliers, setSuppliers] = useState<Supplier[]>([]);
+  const [data, setData] = useState<DashboardData | null>(null);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const unsubs = [
-      onSnapshot(query(collection(db, "yarn_inventory")), snap => setYarn(snap.docs.map(d => ({ id: d.id, ...d.data() } as YarnInventory))), err => console.warn(err)),
-      onSnapshot(query(collection(db, "production_lots")), snap => setLots(snap.docs.map(d => ({ id: d.id, ...d.data() } as ProductionLot))), err => console.warn(err)),
-      onSnapshot(query(collection(db, "finished_fabrics")), snap => setFabrics(snap.docs.map(d => ({ id: d.id, ...d.data() } as FinishedFabric))), err => console.warn(err)),
-      onSnapshot(query(collection(db, "retail_sales")), snap => setRetail(snap.docs.map(d => ({ id: d.id, ...d.data() } as RetailSale))), err => console.warn(err)),
-      onSnapshot(query(collection(db, "wholesale_invoices")), snap => setWholesale(snap.docs.map(d => ({ id: d.id, ...d.data() } as WholesaleInvoice))), err => console.warn(err)),
-      onSnapshot(query(collection(db, "customers")), snap => setCustomers(snap.docs.map(d => ({ id: d.id, ...d.data() } as Customer))), err => console.warn(err)),
-      onSnapshot(query(collection(db, "factories")), snap => setFactories(snap.docs.map(d => ({ id: d.id, ...d.data() } as Factory))), err => console.warn(err)),
-      onSnapshot(query(collection(db, "suppliers")), snap => setSuppliers(snap.docs.map(d => ({ id: d.id, ...d.data() } as Supplier))), err => console.warn(err))
-    ];
-    return () => unsubs.forEach(u => u());
+    dashboardApi
+      .get()
+      .then(setData)
+      .catch(() => setData(null))
+      .finally(() => setLoading(false));
   }, []);
 
-  // Calculations
-  const yarnValue = yarn.reduce((sum, y) => sum + (y.balanceKg * y.ratePerKg), 0);
-  const fgValue = fabrics.reduce((sum, f) => sum + (f.quantityMeters * f.costPerMeter), 0);
-  
-  const activeLots = lots.filter(l => l.status !== 'Received in Stock');
-  const lotStages = activeLots.reduce((acc, l) => {
-    acc[l.status] = (acc[l.status] || 0) + 1;
-    return acc;
-  }, {} as Record<string, number>);
+  if (loading) {
+    return (
+      <Box sx={{ p: 4 }}>
+        <LinearProgress />
+      </Box>
+    );
+  }
 
-  const currentMonth = new Date().getMonth();
-  const currentYear = new Date().getFullYear();
-  
-  const thisMonthRetail = retail.filter(r => {
-    const d = r.date?.seconds ? new Date(r.date.seconds * 1000) : new Date(r.date);
-    return d.getMonth() === currentMonth && d.getFullYear() === currentYear;
-  });
-  const retailSalesTotal = thisMonthRetail.reduce((sum, r) => sum + r.totalAmount, 0);
+  const metrics = [
+    { label: "Yarn Stock Value", value: formatCurrency(data?.yarnValue), icon: <Package />, color: "#2563eb" },
+    { label: "Lots in Production", value: String(data?.activeLots ?? 0), icon: <FactoryIcon />, color: "#9333ea" },
+    { label: "Finished Goods Value", value: formatCurrency(data?.fgValue), icon: <Layers />, color: "#f97316" },
+    { label: "This Month Sales", value: formatCurrency(data?.totalSales), icon: <TrendingUp />, color: "#16a34a" },
+  ];
 
-  const thisMonthWholesale = wholesale.filter(w => {
-    const d = w.date?.seconds ? new Date(w.date.seconds * 1000) : new Date(w.date);
-    return d.getMonth() === currentMonth && d.getFullYear() === currentYear;
-  });
-  const wholesaleSalesTotal = thisMonthWholesale.reduce((sum, w) => sum + w.totalAmount, 0);
+  const chartData = (data?.sales7d ?? []).map((d) => ({
+    day: formatDate(new Date(d.date).getTime()),
+    Retail: d.retail,
+    Wholesale: d.wholesale,
+  }));
 
-  // Profit Estimate (Sales - COGS)
-  let retailCOGS = 0;
-  thisMonthRetail.forEach(sale => {
-    sale.items.forEach(item => {
-      const fallbackFab = fabrics.find(f => f.id === item.fabricId);
-      const cost = item.costAtSaleTime !== undefined ? item.costAtSaleTime : (fallbackFab ? fallbackFab.costPerMeter : 0);
-      retailCOGS += cost * item.quantity;
-    });
-  });
-
-  let wholesaleCOGS = 0;
-  thisMonthWholesale.forEach(inv => {
-    inv.items.forEach(item => {
-      const fallbackFab = fabrics.find(f => f.id === item.fabricId);
-      const cost = item.costAtSaleTime !== undefined ? item.costAtSaleTime : (fallbackFab ? fallbackFab.costPerMeter : 0);
-      wholesaleCOGS += cost * item.quantity;
-    });
-  });
-
-  const totalSales = retailSalesTotal + wholesaleSalesTotal;
-  const totalCOGS = retailCOGS + wholesaleCOGS;
-  const estimatedProfit = totalSales - totalCOGS;
+  const lotStages = Object.entries(data?.lotStages ?? {});
 
   return (
-    <div className="space-y-6">
-      <div className="flex justify-between items-center">
-        <h1 className="text-2xl font-bold text-neutral-900">Dashboard</h1>
-      </div>
-      
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-        <Card>
-          <CardContent className="p-6 flex items-center gap-4">
-            <div className="p-3 bg-blue-100 text-blue-600 rounded-full">
-              <Package size={24} />
-            </div>
-            <div>
-              <p className="text-sm font-medium text-neutral-500">Yarn Stock Value</p>
-              <p className="text-2xl font-bold text-neutral-900">{formatCurrency(yarnValue)}</p>
-            </div>
-          </CardContent>
-        </Card>
-        
-        <Card>
-          <CardContent className="p-6 flex items-center gap-4">
-            <div className="p-3 bg-purple-100 text-purple-600 rounded-full">
-              <FactoryIcon size={24} />
-            </div>
-            <div>
-              <p className="text-sm font-medium text-neutral-500">Lots in Production</p>
-              <p className="text-2xl font-bold text-neutral-900">{activeLots.length}</p>
-            </div>
-          </CardContent>
-        </Card>
+    <Box>
+      <Typography variant="h1" sx={{ mb: 3 }}>Dashboard</Typography>
 
-        <Card>
-          <CardContent className="p-6 flex items-center gap-4">
-            <div className="p-3 bg-orange-100 text-orange-600 rounded-full">
-              <Layers size={24} />
-            </div>
-            <div>
-              <p className="text-sm font-medium text-neutral-500">Finished Goods Value</p>
-              <p className="text-2xl font-bold text-neutral-900">{formatCurrency(fgValue)}</p>
-            </div>
-          </CardContent>
-        </Card>
+      <Grid container spacing={2.5}>
+        {metrics.map((m) => (
+          <Grid size={{ xs: 12, sm: 6, lg: 3 }} key={m.label}>
+            <Card variant="outlined">
+              <CardContent sx={{ display: "flex", alignItems: "center", gap: 2 }}>
+                <Box
+                  sx={{
+                    width: 48,
+                    height: 48,
+                    borderRadius: "50%",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    color: m.color,
+                    bgcolor: `${m.color}1a`,
+                  }}
+                >
+                  {m.icon}
+                </Box>
+                <Box>
+                  <Typography variant="body2" color="text.secondary">{m.label}</Typography>
+                  <Typography variant="h5" sx={{ fontWeight: 700 }}>{m.value}</Typography>
+                </Box>
+              </CardContent>
+            </Card>
+          </Grid>
+        ))}
+      </Grid>
 
-        <Card>
-          <CardContent className="p-6 flex items-center gap-4">
-            <div className="p-3 bg-green-100 text-green-600 rounded-full">
-              <TrendingUp size={24} />
-            </div>
-            <div>
-              <p className="text-sm font-medium text-neutral-500">This Month Sales</p>
-              <p className="text-2xl font-bold text-neutral-900">{formatCurrency(totalSales)}</p>
-            </div>
-          </CardContent>
-        </Card>
-      </div>
+      <Grid container spacing={2.5} sx={{ mt: 0.5 }}>
+        <Grid size={{ xs: 12, lg: 8 }}>
+          <Card variant="outlined" sx={{ height: "100%" }}>
+            <CardContent>
+              <Stack direction="row" sx={{ justifyContent: "space-between", alignItems: "center", mb: 2 }}>
+                <Typography variant="h3">Sales — Last 7 Days</Typography>
+                <Coins color="#a3a3a3" />
+              </Stack>
+              <ResponsiveContainer width="100%" height={300}>
+                <BarChart data={chartData}>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                  <XAxis dataKey="day" fontSize={12} />
+                  <YAxis fontSize={12} />
+                  <Tooltip formatter={(v) => formatCurrency(Number(v))} />
+                  <Legend />
+                  <Bar dataKey="Retail" fill="#2563eb" radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="Wholesale" fill="#9333ea" radius={[4, 4, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            </CardContent>
+          </Card>
+        </Grid>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <Card className="lg:col-span-2">
-          <CardHeader>
-            <CardTitle className="flex justify-between items-center">
-              <span>Financial Overview (This Month)</span>
-              <Coins className="text-neutral-400" />
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="grid grid-cols-3 gap-4 mb-6">
-              <div className="p-4 bg-neutral-50 rounded-lg border border-neutral-100">
-                <p className="text-sm text-neutral-500 mb-1">Retail Sales</p>
-                <p className="text-xl font-bold text-neutral-800">{formatCurrency(retailSalesTotal)}</p>
-              </div>
-              <div className="p-4 bg-neutral-50 rounded-lg border border-neutral-100">
-                <p className="text-sm text-neutral-500 mb-1">Wholesale Sales</p>
-                <p className="text-xl font-bold text-neutral-800">{formatCurrency(wholesaleSalesTotal)}</p>
-              </div>
-              <div className="p-4 bg-green-50 rounded-lg border border-green-100">
-                <p className="text-sm text-green-600 mb-1">Estimated Profit</p>
-                <p className="text-xl font-bold text-green-700">{formatCurrency(estimatedProfit)}</p>
-              </div>
-            </div>
-            
-            <h3 className="font-semibold text-neutral-700 mb-3">Production Pipeline</h3>
-            <div className="flex flex-wrap gap-2">
-              {Object.entries(lotStages).map(([stage, count]) => (
-                <div key={stage} className="flex-1 min-w-[120px] bg-neutral-900 text-white p-3 rounded-md text-center">
-                  <div className="text-2xl font-bold">{count}</div>
-                  <div className="text-xs text-neutral-400 mt-1 uppercase tracking-wider">{stage}</div>
-                </div>
-              ))}
-              {activeLots.length === 0 && (
-                <div className="w-full text-center py-6 text-neutral-500 border border-dashed border-neutral-300 rounded-md">
+        <Grid size={{ xs: 12, lg: 4 }}>
+          <Card variant="outlined" sx={{ height: "100%" }}>
+            <CardContent>
+              <Typography variant="h3" sx={{ mb: 2 }}>Financial Overview (This Month)</Typography>
+              <Stack spacing={1.5}>
+                {[
+                  { label: "Retail Sales", value: formatCurrency(data?.retailSalesTotal), color: "text.secondary" },
+                  { label: "Wholesale Sales", value: formatCurrency(data?.wholesaleSalesTotal), color: "text.secondary" },
+                  { label: "Estimated Profit", value: formatCurrency(data?.estimatedProfit), color: "#16a34a", bold: true },
+                  { label: "Cash Balance", value: formatCurrency(data?.cashBalance), color: data?.cashBalance && data.cashBalance < 0 ? "#dc2626" : "text.secondary" },
+                ].map((r) => (
+                  <Stack
+                    key={r.label}
+                    direction="row"
+                    sx={{ justifyContent: "space-between", alignItems: "center", p: 1.5, bgcolor: "grey.50", borderRadius: 1, border: "1px solid", borderColor: "divider" }}
+                  >
+                    <Typography sx={{ color: r.color, fontWeight: r.bold ? 700 : 400 }}>{r.label}</Typography>
+                    <Typography sx={{ fontWeight: r.bold ? 700 : 600 }}>{r.value}</Typography>
+                  </Stack>
+                ))}
+              </Stack>
+            </CardContent>
+          </Card>
+        </Grid>
+      </Grid>
+
+      <Grid container spacing={2.5} sx={{ mt: 0.5 }}>
+        <Grid size={{ xs: 12, md: 6 }}>
+          <Card variant="outlined">
+            <CardContent>
+              <Typography variant="h3" sx={{ mb: 2 }}>Production Pipeline</Typography>
+              {lotStages.length === 0 ? (
+                <Paper variant="outlined" sx={{ p: 4, textAlign: "center", color: "text.secondary" }}>
                   No lots currently in production.
-                </div>
+                </Paper>
+              ) : (
+                <Stack spacing={1}>
+                  {lotStages.map(([stage, count]) => (
+                    <Box
+                      key={stage}
+                      sx={{
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                        bgcolor: "grey.900",
+                        color: "white",
+                        px: 2,
+                        py: 1.5,
+                        borderRadius: 1,
+                      }}
+                    >
+                      <Typography variant="body2" sx={{ color: "grey.400", textTransform: "uppercase", fontSize: 12 }}>
+                        {stage}
+                      </Typography>
+                      <Typography variant="h6" sx={{ fontWeight: 700 }}>{count}</Typography>
+                    </Box>
+                  ))}
+                </Stack>
               )}
-            </div>
-          </CardContent>
-        </Card>
-
-        <div className="space-y-6">
-          <Card>
-            <CardHeader className="pb-3">
-              <CardTitle className="text-sm text-neutral-500 uppercase tracking-wider">Top Receivables (Customers Owe Us)</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="space-y-3">
-                {customers.filter(c => c.balance > 0).sort((a,b) => b.balance - a.balance).slice(0,5).map(c => (
-                  <div key={c.id} className="flex justify-between items-center">
-                    <span className="font-medium text-sm">{c.name}</span>
-                    <span className="text-green-600 font-semibold text-sm">{formatCurrency(c.balance)}</span>
-                  </div>
-                ))}
-                {customers.filter(c => c.balance > 0).length === 0 && (
-                  <p className="text-sm text-neutral-400">All customer accounts settled.</p>
-                )}
-              </div>
             </CardContent>
           </Card>
+        </Grid>
 
-          <Card>
-            <CardHeader className="pb-3">
-              <CardTitle className="text-sm text-neutral-500 uppercase tracking-wider">Top Payables (Factories)</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="space-y-3">
-                {factories.filter(f => f.balance > 0).sort((a,b) => b.balance - a.balance).slice(0,5).map(f => (
-                  <div key={f.id} className="flex justify-between items-center">
-                    <span className="font-medium text-sm">{f.name}</span>
-                    <span className="text-red-600 font-semibold text-sm">{formatCurrency(f.balance)}</span>
-                  </div>
-                ))}
-                {factories.filter(f => f.balance > 0).length === 0 && (
-                  <p className="text-sm text-neutral-400">All factory accounts settled.</p>
+        <Grid size={{ xs: 12, md: 6 }}>
+          <Stack spacing={2.5}>
+            <Card variant="outlined">
+              <CardContent>
+                <Typography variant="h3" sx={{ mb: 1.5, fontSize: 14, color: "text.secondary", textTransform: "uppercase" }}>
+                  Top Receivables
+                </Typography>
+                {data?.topReceivables.length ? (
+                  data.topReceivables.map((c) => (
+                    <Stack key={c.id} direction="row" sx={{ justifyContent: "space-between", py: 0.75 }}>
+                      <Typography>{c.name}</Typography>
+                      <Typography sx={{ color: "success.main", fontWeight: 600 }}>{formatCurrency(c.balance)}</Typography>
+                    </Stack>
+                  ))
+                ) : (
+                  <Typography color="text.secondary" variant="body2">All customer accounts settled.</Typography>
                 )}
-              </div>
-            </CardContent>
-          </Card>
+              </CardContent>
+            </Card>
 
-          <Card>
-            <CardHeader className="pb-3">
-              <CardTitle className="text-sm text-neutral-500 uppercase tracking-wider">Top Payables (Suppliers)</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="space-y-3">
-                {suppliers.filter(s => s.balanceOwed > 0).sort((a,b) => b.balanceOwed - a.balanceOwed).slice(0,5).map(s => (
-                  <div key={s.id} className="flex justify-between items-center">
-                    <span className="font-medium text-sm">{s.name}</span>
-                    <span className="text-red-600 font-semibold text-sm">{formatCurrency(s.balanceOwed)}</span>
-                  </div>
+            <Card variant="outlined">
+              <CardContent>
+                <Typography variant="h3" sx={{ mb: 1.5, fontSize: 14, color: "text.secondary", textTransform: "uppercase" }}>
+                  Top Payables — Factories & Suppliers
+                </Typography>
+                {data?.topFactoryPayables.map((f) => (
+                  <Stack key={f.id} direction="row" sx={{ justifyContent: "space-between", py: 0.75 }}>
+                    <Typography>{f.name}</Typography>
+                    <Typography sx={{ color: "error.main", fontWeight: 600 }}>{formatCurrency(f.balance)}</Typography>
+                  </Stack>
                 ))}
-                {suppliers.filter(s => s.balanceOwed > 0).length === 0 && (
-                  <p className="text-sm text-neutral-400">All supplier accounts settled.</p>
+                {data?.topSupplierPayables.map((s) => (
+                  <Stack key={s.id} direction="row" sx={{ justifyContent: "space-between", py: 0.75 }}>
+                    <Typography>{s.name}</Typography>
+                    <Typography sx={{ color: "error.main", fontWeight: 600 }}>{formatCurrency(s.balanceOwed)}</Typography>
+                  </Stack>
+                ))}
+                {!data?.topFactoryPayables.length && !data?.topSupplierPayables.length && (
+                  <Typography color="text.secondary" variant="body2">No outstanding payables.</Typography>
                 )}
-              </div>
-            </CardContent>
-          </Card>
-        </div>
-      </div>
-    </div>
+              </CardContent>
+            </Card>
+          </Stack>
+        </Grid>
+      </Grid>
+    </Box>
   );
 }

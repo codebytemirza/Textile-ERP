@@ -1,59 +1,81 @@
-import { createContext, useContext, useEffect, useState } from "react";
-import { auth, db } from "../lib/firebase";
-import { onAuthStateChanged, signInWithEmailAndPassword, signOut } from "firebase/auth";
-import { doc, getDoc, setDoc } from "firebase/firestore";
-import { User, Role } from "../types";
+import { createContext, useCallback, useContext, useEffect, useState } from "react";
+import { authApi, type SessionUser } from "../api";
+import { getToken, setToken } from "../api/client";
 
 interface AuthContextType {
-  user: User | null;
+  user: SessionUser | null;
   loading: boolean;
   login: (email: string, pass: string) => Promise<void>;
+  register: (email: string, pass: string, name: string) => Promise<void>;
   logout: () => Promise<void>;
+  demoCreds: { email: string; password: string };
 }
 
 const AuthContext = createContext<AuthContextType>({} as AuthContextType);
 
 export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
-  const [user, setUser] = useState<User | null>(null);
+  const [user, setUser] = useState<SessionUser | null>(null);
   const [loading, setLoading] = useState(true);
+  const [demoCreds, setDemoCreds] = useState({ email: "admin@textileerp.com", password: "admin123" });
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
-      if (firebaseUser) {
-        try {
-          const docRef = doc(db, "users", firebaseUser.uid);
-          const docSnap = await getDoc(docRef);
-          if (docSnap.exists()) {
-            setUser({ id: firebaseUser.uid, ...docSnap.data() } as User);
-          } else {
-            // For MVP seed fallback if not explicitly in DB
-            const newUser = { email: firebaseUser.email || '', role: 'Admin', name: 'Admin User' };
-            await setDoc(docRef, newUser);
-            setUser({ id: firebaseUser.uid, ...newUser } as User);
-          }
-        } catch (error) {
-          console.error("Error fetching user role", error);
-        }
-      } else {
-        setUser(null);
+    let cancelled = false;
+    const restore = async () => {
+      if (!getToken()) {
+        setLoading(false);
+        return;
       }
-      setLoading(false);
-    });
+      try {
+        const { user } = await authApi.me();
+        if (!cancelled) setUser(user);
+      } catch {
+        setToken(null);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
 
-    return unsubscribe;
+    const onUnauthorized = () => {
+      setUser(null);
+      setToken(null);
+    };
+    window.addEventListener("erp:unauthorized", onUnauthorized);
+
+    restore();
+    authApi.demo().then((d) => {
+      if (!cancelled) setDemoCreds(d);
+    }).catch(() => {});
+
+    return () => {
+      cancelled = true;
+      window.removeEventListener("erp:unauthorized", onUnauthorized);
+    };
   }, []);
 
-  const login = async (email: string, pass: string) => {
-    await signInWithEmailAndPassword(auth, email, pass);
-  };
+  const login = useCallback(async (email: string, pass: string) => {
+    const res = await authApi.login(email, pass);
+    setToken(res.token);
+    setUser(res.user);
+  }, []);
 
-  const logout = async () => {
-    await signOut(auth);
-  };
+  const register = useCallback(async (email: string, pass: string, name: string) => {
+    const res = await authApi.register(email, pass, name);
+    setToken(res.token);
+    setUser(res.user);
+  }, []);
+
+  const logout = useCallback(async () => {
+    try {
+      await authApi.logout();
+    } finally {
+      setToken(null);
+      setUser(null);
+    }
+  }, []);
 
   return (
-    <AuthContext.Provider value={{ user, loading, login, logout }}>
-      {!loading && children}
+    <AuthContext.Provider value={{ user, loading, login, register, logout, demoCreds }}>
+      {children}
     </AuthContext.Provider>
   );
 };
